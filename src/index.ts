@@ -1,13 +1,17 @@
 // Copyright 2023 Signal Messenger, LLC
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import {error, IRequest, json, Router, StatusError} from 'itty-router';
+import {cors, error, IRequest, json, Router, StatusError} from 'itty-router';
+
+// Extend IRequest to include custom properties
+
 import {Auth, createAuth} from './auth';
 import {Buffer} from 'node:buffer';
 import {MAX_UPLOAD_LENGTH_BYTES, TUS_VERSION, X_SIGNAL_CHECKSUM_SHA256} from './uploadHandler';
 import {toBase64} from './util';
 import {parseUploadMetadata} from './parse';
 import {DEFAULT_RETRY_PARAMS, retry, isR2RangedReadHeaderError, RetryBucket,} from './retry';
+import { CORS_CONFIG, isAllowedOrigin } from './cors';
 
 export {UploadHandler, BackupUploadHandler, AttachmentUploadHandler} from './uploadHandler';
 
@@ -23,16 +27,74 @@ export interface Env {
     ATTACHMENT_UPLOAD_HANDLER: DurableObjectNamespace;
 
     BACKUP_UPLOAD_HANDLER: DurableObjectNamespace;
+
+    // Queue for upload completion notifications
+    UPLOAD_QUEUE?: Queue;
 }
 
 const ATTACHMENT_PREFIX = 'attachments';
 const BACKUP_PREFIX = 'backups';
 
-
 // lazy init because it requires env but is expensive to create
 let auth: Auth | undefined;
 
-const router = Router();
+// Extract serviceId from query parameter and attach to request
+function withServiceIdFromQuery(request: IRequest, _env: Env, _ctx: ExecutionContext): Response | undefined {
+    const url = new URL(request.url);
+    const serviceId = url.searchParams.get('serviceId');
+
+    if (!serviceId) {
+        return error(400, 'serviceId query parameter is required');
+    }
+
+    // Validate UUID format (basic validation)
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(serviceId)) {
+        return error(400, 'serviceId must be a valid UUID');
+    }
+
+    // Store serviceId in request for later use (itty-router extends IRequest dynamically)
+    (request as any).serviceId = serviceId;
+
+    return;
+}
+
+const { corsify, preflight } = cors({
+allowHeaders: CORS_CONFIG["allowHeaders"],
+  allowMethods: CORS_CONFIG["allowMethods"],
+  exposeHeaders: CORS_CONFIG["allowHeaders"],
+  credentials: CORS_CONFIG.credentials,
+  maxAge: CORS_CONFIG["maxAge"],
+  origin: (origin) => {
+    console.log(
+      "AM_CALLED:: Origin:",
+      origin,
+      "| Allowed:",
+      isAllowedOrigin(origin)
+    );
+
+    // If origin is null, check the Referer header as fallback
+    if (!origin || origin === "null") {
+      console.log("⚠ Origin is null - allowing with wildcard or fallback");
+      // Return true to allow the request (itty-router will use the origin from request)
+      return "*";
+    }
+
+    if (isAllowedOrigin(origin)) {
+      console.log("✓ Origin allowed, returning:", origin);
+      return origin;
+    }
+    console.log("✗ Origin NOT allowed, returning undefined");
+    return undefined;
+  },
+});
+
+
+const router = Router({
+  before: [preflight],
+  finally: [corsify],
+  // finally: [corsify],
+});
 router
     // Describes what TUS features we support
     .options('/upload/:bucket', optionsHandler)
@@ -54,16 +116,19 @@ router
     // TUS protocol operations, dispatched to an UploadHandler durable object
     .post(`/upload/${ATTACHMENT_PREFIX}`,
         withNamespace(ATTACHMENT_PREFIX),
+        withServiceIdFromQuery,
         withAuthenticatedUser,
         withAuthorizedKeyFromMetadata,
         uploadHandler)
     .patch(`/upload/${ATTACHMENT_PREFIX}/:id+`,
         withNamespace(ATTACHMENT_PREFIX),
+        withServiceIdFromQuery,
         withAuthenticatedUser,
         withAuthorizedKeyFromPath,
         uploadHandler)
     .head(`/upload/${ATTACHMENT_PREFIX}/:id+`,
         withNamespace(ATTACHMENT_PREFIX),
+        withServiceIdFromQuery,
         withAuthenticatedUser,
         withAuthorizedKeyFromPath,
         uploadHandler)

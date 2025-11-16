@@ -15,6 +15,11 @@ durable_objects.bindings = [
     { name = "BACKUP_UPLOAD_HANDLER", class_name = "BackupUploadHandler" }
 ]
 
+# Queue for upload completion notifications
+[[queues.producers]]
+queue = "upload-completed"
+binding = "UPLOAD_QUEUE"
+
 [[migrations]]
 tag = "v1"
 new_classes = ["UploadHandler"]

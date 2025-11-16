@@ -46,6 +46,7 @@ interface StoredR2Part {
 
 // Infrequently changing information about the upload
 interface StoredUploadInfo {
+    serviceId?: string,
     uploadLength?: number,
     checksum?: Uint8Array,
     multipartUploadId?: string
@@ -175,6 +176,12 @@ export class UploadHandler {
         }
 
         const uploadInfo: StoredUploadInfo = {};
+
+        // Extract serviceId from request (set by withServiceIdFromQuery middleware)
+        const serviceId = (request as any).serviceId;
+        if (serviceId) {
+            uploadInfo.serviceId = serviceId;
+        }
 
         const expiration = new Date(Date.now() + UPLOAD_EXPIRATION_MS);
         await this.state.storage.setAlarm(expiration);
@@ -338,7 +345,7 @@ export class UploadHandler {
                         length: part.bytes.byteLength
                     });
                     uploadOffset += part.bytes.byteLength;
-                    const writePart = this.state.storage.put(this.parts.length.toString(), this.parts.at(-1));
+                    const writePart = this.state.storage.put(this.parts.length.toString(), this.parts.slice(-1)[0]);
                     const writeOffset = this.state.storage.put(UPLOAD_OFFSET_KEY, uploadOffset);
                     await Promise.all([writePart, writeOffset]);
                     break;
@@ -357,6 +364,10 @@ export class UploadHandler {
                         // it directly without using multipart
                         await this.r2Put(r2Key, part.bytes, checksum);
                         uploadOffset += part.bytes.byteLength;
+
+                        // Send completion message to queue before cleanup
+                        await this.sendCompletionMessage(r2Key, uploadOffset);
+
                         await this.cleanup();
                     } else {
                         // upload the last part (can be less than the 5mb min part size), then complete the upload
@@ -364,6 +375,10 @@ export class UploadHandler {
                         this.parts.push({part: uploadedPart, length: part.bytes.byteLength});
                         await this.r2CompleteMultipartUpload(r2Key, await digester.digest(), checksum);
                         uploadOffset += part.bytes.byteLength;
+
+                        // Send completion message to queue before cleanup
+                        await this.sendCompletionMessage(r2Key, uploadOffset);
+
                         await this.cleanup();
                     }
                     break;
@@ -483,7 +498,7 @@ export class UploadHandler {
 
     async r2Put(r2Key: string, bytes: Uint8Array, checksum?: Uint8Array) {
         try {
-            await this.retryBucket.put(r2Key, bytes, checksum);
+            await this.retryBucket.put(r2Key, bytes, checksum as unknown as any);
         } catch (e) {
             if (isR2ChecksumError(e)) {
                 console.error(`checksum failure: ${e}`);
@@ -541,6 +556,39 @@ export class UploadHandler {
         }
     }
 
+
+    // Send upload completion message to queue
+    async sendCompletionMessage(r2Key: string, fileSize: number): Promise<void> {
+        try {
+            const uploadInfo: StoredUploadInfo | undefined = await this.state.storage.get(UPLOAD_INFO_KEY);
+
+            if (!uploadInfo?.serviceId) {
+                console.warn('No serviceId found in upload info, skipping queue message');
+                return;
+            }
+
+            if (!this.env.UPLOAD_QUEUE) {
+                console.warn('UPLOAD_QUEUE not configured, skipping queue message');
+                return;
+            }
+
+            await this.env.UPLOAD_QUEUE.send({
+                type: 'upload.completed',
+                serviceId: uploadInfo.serviceId,
+                r2Key: r2Key,
+                fileSize: fileSize,
+                uploadedAt: new Date().toISOString(),
+                multipartUploadId: uploadInfo.multipartUploadId,
+                checksum: uploadInfo.checksum ? toBase64(uploadInfo.checksum) : undefined
+            });
+
+            console.log(`Sent completion message for serviceId: ${uploadInfo.serviceId}`);
+        } catch (error) {
+            console.error('Failed to send queue message:', error);
+            // Don't throw - upload already succeeded, message loss is acceptable
+            // Client got 200 OK and file is in R2
+        }
+    }
 
     tempkey(): string {
         return 'temporary/' + this.state.id.toString();
