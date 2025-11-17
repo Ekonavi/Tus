@@ -1,23 +1,17 @@
 // Copyright 2023 Signal Messenger, LLC
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import {
-  error,
-  IRequest,
-  json,
-  Router,
-  RouterType,
-  StatusError,
-} from "itty-router";
+import { IRequest, Router, RouterType, StatusError } from "itty-router";
 import { Buffer } from "node:buffer";
 import {
   AsyncLock,
   generateParts,
+  mutableError,
   readIntFromHeader,
   toBase64,
   WritableStreamBuffer,
 } from "./util";
-import { Env } from "./index";
+import { Env } from "./env.types";
 import { Digester, noopDigester, sha256Digester } from "./digest";
 import { parseChecksum, parseUploadMetadata } from "./parse";
 import {
@@ -29,6 +23,8 @@ import {
   RetryMultipartUpload,
 } from "./retry";
 import { R2UploadedPart } from "@cloudflare/workers-types";
+import { ATTACHMENT_PREFIX, BACKUP_PREFIX } from "./constant";
+import { headerStandalone } from "./cors";
 
 export const TUS_VERSION = "1.0.0";
 
@@ -94,13 +90,20 @@ export class UploadHandler {
   parts: StoredR2Part[];
   multipart: RetryMultipartUpload | undefined;
   retryBucket: RetryBucket;
+  prefix: string;
 
   // only allow a single request to operate at a time
   requestGate: AsyncLock;
 
-  constructor(state: DurableObjectState, env: Env, bucket: R2Bucket) {
+  constructor(
+    state: DurableObjectState,
+    env: Env,
+    bucket: R2Bucket,
+    prefix: string
+  ) {
     this.state = state;
     this.env = env;
+    this.prefix = prefix;
     this.parts = [];
     this.requestGate = new AsyncLock();
     this.retryBucket = new RetryBucket(bucket, DEFAULT_RETRY_PARAMS);
@@ -108,12 +111,15 @@ export class UploadHandler {
       .post("/upload/:bucket", this.exclusive(this.create))
       .patch("/upload/:bucket/:id+", this.exclusive(this.patch))
       .head("/upload/:bucket/:id+", this.exclusive(this.head))
-      .all("*", () => error(404));
+      .all("*", (req) => {
+        console.log("NO_ROUTE_FOUND:", req.url);
+        return mutableError(404);
+      });
   }
 
   // forbid concurrent requests while running clsMethod
   exclusive(
-    clsMethod: (r: IRequest) => Promise<Response>,
+    clsMethod: (r: IRequest) => Promise<Response>
   ): (r: IRequest) => Promise<Response> {
     return async (request) => {
       const release = await this.requestGate.lock();
@@ -124,7 +130,7 @@ export class UploadHandler {
           try {
             const ue = e as UnrecoverableError;
             console.error(
-              `Upload for ${ue.r2Key} failed with unrecoverable error ${ue.message}`,
+              `Upload for ${ue.r2Key} failed with unrecoverable error ${ue.message}`
             );
             // this upload can never make progress, try to clean up
             await this.cleanup(ue.r2Key);
@@ -141,16 +147,13 @@ export class UploadHandler {
   }
 
   fetch(request: Request): Promise<Response> {
-    return this.router
-      .fetch(request)
-      .then(json)
-      .catch((e) => {
-        if (e instanceof StatusError) {
-          return error(e);
-        }
-        console.error("server error processing request: " + e);
-        throw e;
-      });
+    return this.router.fetch(request).catch((e) => {
+      if (e instanceof StatusError) {
+        return mutableError(e.status, e.message);
+      }
+      console.error("server error processing request: " + e);
+      throw e;
+    });
   }
 
   async alarm() {
@@ -159,20 +162,35 @@ export class UploadHandler {
 
   // create a new TUS upload
   async create(request: IRequest): Promise<Response> {
+    const authHeader = request.headers.get("Authorization");
+    const url = new URL(request.url);
+    const authTokenParam = url.searchParams.get("token");
+    const serviceId = url.searchParams.get("serviceId") || crypto.randomUUID();
+
+    let receivedToken = authTokenParam;
+
+    if (authHeader?.startsWith("Basic ")) {
+      receivedToken = authHeader.substring(6); // Remove 'Bearer ' prefix
+    }
+
     const uploadMetadata = parseUploadMetadata(request.headers);
     const checksum = parseChecksum(request.headers);
 
-    const r2Key = uploadMetadata.filename;
+    const r2Key = this.prefix + "/" + uploadMetadata.filename;
+    if (!receivedToken) {
+      console.log("NO TOKEN_FOUND");
+      return mutableError(401, "no token found");
+    }
     if (r2Key == null) {
-      return error(400, "bad filename metadata");
+      return mutableError(400, "bad filename metadata");
     }
 
     const existingUploadOffset: number | undefined =
       await this.state.storage.get(UPLOAD_OFFSET_KEY);
+
     if (existingUploadOffset != null && existingUploadOffset > 0) {
-      console.log("duplicate object creation");
       await this.cleanup(r2Key);
-      return error(409, "object already exists");
+      return mutableError(409, "object already exists");
     }
 
     // The client may provide an initial request body (creation-with-upload)
@@ -181,39 +199,39 @@ export class UploadHandler {
       contentType != null &&
       contentType !== "application/offset+octet-stream"
     ) {
-      return error(
+      return mutableError(
         415,
-        "create only supports application/offset+octet-stream content-type",
+        "create only supports application/offset+octet-stream content-type"
       );
     }
+
     const contentLength = readIntFromHeader(request.headers, "Content-Length");
     if (!isNaN(contentLength) && contentLength > 0 && contentType == null) {
-      return error(
+      return mutableError(
         415,
-        "body requires application/offset+octet-stream content-type",
+        "body requires application/offset+octet-stream content-type"
       );
     }
     const hasContent = request.body != null && contentType != null;
     const uploadLength = readIntFromHeader(request.headers, "Upload-Length");
     const uploadDeferLength = readIntFromHeader(
       request.headers,
-      "Upload-Defer-Length",
+      "Upload-Defer-Length"
     );
     if (isNaN(uploadLength) && isNaN(uploadDeferLength)) {
-      return error(
+      return mutableError(
         400,
-        "must contain Upload-Length or Upload-Defer-Length header",
+        "must contain Upload-Length or Upload-Defer-Length header"
       );
     }
 
     if (!isNaN(uploadDeferLength) && uploadDeferLength !== 1) {
-      return error(400, "bad Upload-Defer-Length");
+      return mutableError(400, "bad Upload-Defer-Length");
     }
 
     const uploadInfo: StoredUploadInfo = {};
 
     // Extract serviceId from request (set by withServiceIdFromQuery middleware)
-    const serviceId = (request as any).serviceId;
     if (serviceId) {
       uploadInfo.serviceId = serviceId;
     }
@@ -231,12 +249,14 @@ export class UploadHandler {
 
     const uploadLocation = new URL(
       r2Key,
-      request.url.endsWith("/") ? request.url : request.url + "/",
+      request.url.endsWith("/") ? request.url : request.url + "/"
     );
-
+    uploadLocation.searchParams.append("serviceId", serviceId);
+    uploadLocation.searchParams.append("token", receivedToken);
     const uploadOffset = hasContent
       ? await this.appendBody(r2Key, request.body, 0, uploadInfo)
       : 0;
+
     return new Response(null, {
       status: 201,
       headers: new Headers({
@@ -250,15 +270,15 @@ export class UploadHandler {
 
   // get the current upload offset to resume an upload
   async head(request: IRequest): Promise<Response> {
-    const r2Key = request.params.id!;
-
+    const r2Key = this.prefix + "/" + request.params.id!;
+    console.log("HEAD::", r2Key);
     let offset: number | undefined =
       await this.state.storage.get(UPLOAD_OFFSET_KEY);
     let uploadLength: number | undefined;
     if (offset == null) {
       const headResponse = await this.retryBucket.head(r2Key);
       if (headResponse == null) {
-        return error(404);
+        return mutableError(404);
       }
       offset = headResponse.size;
       uploadLength = headResponse.size;
@@ -273,26 +293,30 @@ export class UploadHandler {
       "Upload-Expires": (await this.expirationTime()).toString(),
       "Cache-Control": "no-store",
       "Tus-Resumable": TUS_VERSION,
+      "Access-Control-Expose-Headers": headerStandalone,
     });
+
     if (uploadLength != null) {
       headers.set("Upload-Length", uploadLength.toString());
     }
+
     return new Response(null, { headers });
   }
 
   // append to the upload at the current upload offset
   async patch(request: IRequest): Promise<Response> {
-    const r2Key = request.params.id!;
+    const r2Key = this.prefix + "/" + request.params.id!;
 
     let uploadOffset: number | undefined =
       await this.state.storage.get(UPLOAD_OFFSET_KEY);
+
     if (uploadOffset == null) {
-      return error(404);
+      return mutableError(404);
     }
 
     const headerOffset = readIntFromHeader(request.headers, "Upload-Offset");
     if (uploadOffset !== headerOffset) {
-      return error(409, "incorrect upload offset");
+      return mutableError(409, "incorrect upload offset");
     }
 
     const uploadInfo: StoredUploadInfo | undefined =
@@ -300,19 +324,19 @@ export class UploadHandler {
     if (uploadInfo == null) {
       throw new UnrecoverableError(
         "existing upload should have had uploadInfo",
-        r2Key,
+        r2Key
       );
     }
     const headerUploadLength = readIntFromHeader(
       request.headers,
-      "Upload-Length",
+      "Upload-Length"
     );
     if (
       uploadInfo.uploadLength != null &&
       !isNaN(headerUploadLength) &&
       uploadInfo.uploadLength !== headerUploadLength
     ) {
-      return error(400, "upload length cannot change");
+      return mutableError(400, "upload length cannot change");
     }
 
     // check if we now know the upload length
@@ -322,14 +346,14 @@ export class UploadHandler {
     }
 
     if (request.body == null) {
-      return error(400, "Must provide request body");
+      return mutableError(400, "Must provide request body");
     }
 
     uploadOffset = await this.appendBody(
       r2Key,
       request.body,
       uploadOffset,
-      uploadInfo,
+      uploadInfo
     );
 
     return new Response(null, {
@@ -365,7 +389,7 @@ export class UploadHandler {
     r2Key: string,
     body: ReadableStream<Uint8Array>,
     uploadOffset: number,
-    uploadInfo: StoredUploadInfo,
+    uploadInfo: StoredUploadInfo
   ): Promise<number> {
     const uploadLength = uploadInfo.uploadLength;
     if ((uploadLength || 0) > MAX_UPLOAD_LENGTH_BYTES) {
@@ -380,7 +404,7 @@ export class UploadHandler {
       r2Key,
       uploadOffset,
       uploadInfo,
-      mem,
+      mem
     );
 
     const isSinglePart = uploadLength != null && uploadLength <= BUFFER_SIZE;
@@ -409,31 +433,32 @@ export class UploadHandler {
           if (this.multipart == null) {
             this.multipart = await this.r2CreateMultipartUpload(
               r2Key,
-              uploadInfo,
+              uploadInfo
             );
           }
           this.parts.push({
             part: await this.r2UploadPart(
               r2Key,
               this.parts.length + 1,
-              part.bytes,
+              part.bytes
             ),
             length: part.bytes.byteLength,
           });
           uploadOffset += part.bytes.byteLength;
           const writePart = this.state.storage.put(
             this.parts.length.toString(),
-            this.parts.slice(-1)[0],
+            this.parts.slice(-1)[0]
           );
           const writeOffset = this.state.storage.put(
             UPLOAD_OFFSET_KEY,
-            uploadOffset,
+            uploadOffset
           );
           await Promise.all([writePart, writeOffset]);
           break;
         }
         case "final":
         case "error": {
+          console.log("FINISH:FINAL:::");
           const finished =
             uploadLength != null &&
             uploadOffset + part.bytes.byteLength === uploadLength;
@@ -454,11 +479,12 @@ export class UploadHandler {
 
             await this.cleanup();
           } else {
+            console.log("APPEND BODY!");
             // upload the last part (can be less than the 5mb min part size), then complete the upload
             const uploadedPart = await this.r2UploadPart(
               r2Key,
               this.parts.length + 1,
-              part.bytes,
+              part.bytes
             );
             this.parts.push({
               part: uploadedPart,
@@ -467,7 +493,7 @@ export class UploadHandler {
             await this.r2CompleteMultipartUpload(
               r2Key,
               await digester.digest(),
-              checksum,
+              checksum
             );
             uploadOffset += part.bytes.byteLength;
 
@@ -487,13 +513,13 @@ export class UploadHandler {
   async checkChecksum(
     r2Key: string,
     expected: Uint8Array,
-    actual: ArrayBuffer,
+    actual: ArrayBuffer
   ) {
     if (!Buffer.from(actual).equals(expected)) {
       await this.cleanup(r2Key);
       throw new StatusError(
         415,
-        `The SHA-256 checksum you specified ${toBase64(actual)} did not match what we received ${toBase64(expected)}.`,
+        `The SHA-256 checksum you specified ${toBase64(actual)} did not match what we received ${toBase64(expected)}.`
       );
     }
   }
@@ -504,7 +530,7 @@ export class UploadHandler {
     if (body == null) {
       throw new UnrecoverableError(
         `Object ${r2Key} not found directly after uploading`,
-        r2Key,
+        r2Key
       );
     }
     const digest = new crypto.DigestStream("SHA-256");
@@ -520,7 +546,7 @@ export class UploadHandler {
     r2Key: string,
     uploadOffset: number,
     uploadInfo: StoredUploadInfo,
-    mem: WritableStreamBuffer,
+    mem: WritableStreamBuffer
   ): Promise<number> {
     if (uploadOffset === 0) {
       return 0;
@@ -540,13 +566,13 @@ export class UploadHandler {
     if (tempobj == null) {
       throw new UnrecoverableError(
         `we claimed to have ${uploadOffset} bytes, only had ${partOffset}`,
-        r2Key,
+        r2Key
       );
     }
     if (partOffset + tempobj.size !== uploadOffset) {
       throw new UnrecoverableError(
         `we claimed to have ${uploadOffset} bytes,  had ${partOffset + tempobj.size}`,
-        r2Key,
+        r2Key
       );
     }
 
@@ -554,7 +580,7 @@ export class UploadHandler {
     if (tempobj.size > mem.buf.byteLength) {
       throw new UnrecoverableError(
         `bad temp object ${this.tempkey()} of length ${tempobj.size}`,
-        r2Key,
+        r2Key
       );
     }
 
@@ -564,7 +590,7 @@ export class UploadHandler {
         write(chunk) {
           return mem.write(chunk);
         },
-      }),
+      })
     );
 
     // return the location in the overall upload where our memory buffer starts
@@ -575,7 +601,7 @@ export class UploadHandler {
   async hydrateParts(
     r2Key: string,
     uploadOffset: number,
-    uploadInfo: StoredUploadInfo,
+    uploadInfo: StoredUploadInfo
   ): Promise<number> {
     if (this.multipart != null) {
       return this.parts.map((p) => p.length).reduce((a, b) => a + b, 0);
@@ -584,7 +610,7 @@ export class UploadHandler {
     let partOffset = 0;
     for (;;) {
       const part: StoredR2Part | undefined = await this.state.storage.get(
-        (this.parts.length + 1).toString(),
+        (this.parts.length + 1).toString()
       );
       if (part == null) {
         break;
@@ -600,12 +626,12 @@ export class UploadHandler {
       if (uploadInfo.multipartUploadId == null) {
         throw new UnrecoverableError(
           `had ${this.parts.length} stored parts but no stored multipartUploadId`,
-          r2Key,
+          r2Key
         );
       }
       this.multipart = this.r2ResumeMultipartUpload(
         r2Key,
-        uploadInfo.multipartUploadId,
+        uploadInfo.multipartUploadId
       );
     }
     return partOffset;
@@ -613,7 +639,7 @@ export class UploadHandler {
 
   async r2CreateMultipartUpload(
     r2Key: string,
-    uploadInfo: StoredUploadInfo,
+    uploadInfo: StoredUploadInfo
   ): Promise<RetryMultipartUpload> {
     const customMetadata: Record<string, string> = {};
     if (uploadInfo.checksum != null) {
@@ -629,7 +655,7 @@ export class UploadHandler {
 
   r2ResumeMultipartUpload(
     r2Key: string,
-    multipartUploadId: string,
+    multipartUploadId: string
   ): RetryMultipartUpload {
     return this.retryBucket.resumeMultipartUpload(r2Key, multipartUploadId);
   }
@@ -653,12 +679,12 @@ export class UploadHandler {
   async r2UploadPart(
     r2Key: string,
     partIndex: number,
-    bytes: Uint8Array,
+    bytes: Uint8Array
   ): Promise<R2UploadedPart> {
     if (this.multipart == null) {
       throw new UnrecoverableError(
         "cannot call complete multipart with no multipart upload",
-        r2Key,
+        r2Key
       );
     }
     try {
@@ -669,7 +695,7 @@ export class UploadHandler {
         // finished the transaction but failed to update the state afterwords. Either way, we should give up.
         throw new UnrecoverableError(
           `multipart upload does not exist ${e}`,
-          r2Key,
+          r2Key
         );
       }
       if (isR2RateLimitError(e)) {
@@ -682,12 +708,12 @@ export class UploadHandler {
   async r2CompleteMultipartUpload(
     r2Key: string,
     actualChecksum?: ArrayBuffer,
-    expectedChecksum?: Uint8Array,
+    expectedChecksum?: Uint8Array
   ) {
     if (this.multipart == null) {
       throw new UnrecoverableError(
         "cannot call complete multipart with no multipart upload",
-        r2Key,
+        r2Key
       );
     }
 
@@ -698,12 +724,12 @@ export class UploadHandler {
 
     try {
       await this.multipart.complete(
-        this.parts.map((storedPart) => storedPart.part),
+        this.parts.map((storedPart) => storedPart.part)
       );
     } catch (e) {
       if (isR2RateLimitError(e)) {
         console.log(
-          `Rate-limit exceeded on complete multipart for key ${r2Key}`,
+          `Rate-limit exceeded on complete multipart for key ${r2Key}`
         );
       }
       throw e;
@@ -714,7 +740,7 @@ export class UploadHandler {
       await this.checkChecksum(
         r2Key,
         expectedChecksum,
-        await this.retrieveChecksum(r2Key),
+        await this.retrieveChecksum(r2Key)
       );
     }
   }
@@ -727,7 +753,7 @@ export class UploadHandler {
 
       if (!uploadInfo?.serviceId) {
         console.warn(
-          "No serviceId found in upload info, skipping queue message",
+          "No serviceId found in upload info, skipping queue message"
         );
         return;
       }
@@ -750,7 +776,7 @@ export class UploadHandler {
       });
 
       console.log(
-        `Sent completion message for serviceId: ${uploadInfo.serviceId}`,
+        `Sent completion message for serviceId: ${uploadInfo.serviceId}`
       );
     } catch (error) {
       console.error("Failed to send queue message:", error);
@@ -782,7 +808,7 @@ export class UploadHandler {
         await this.hydrateParts(
           r2Key,
           (await this.state.storage.get(UPLOAD_OFFSET_KEY)) || 0,
-          (await this.state.storage.get(UPLOAD_INFO_KEY)) || {},
+          (await this.state.storage.get(UPLOAD_INFO_KEY)) || {}
         );
         if (this.multipart != null) {
           await this.multipart.abort();
@@ -810,13 +836,13 @@ export class UploadHandler {
 
 export class AttachmentUploadHandler extends UploadHandler {
   constructor(state: DurableObjectState, env: Env) {
-    super(state, env, env.ATTACHMENT_BUCKET);
+    super(state, env, env.ATTACHMENT_BUCKET, ATTACHMENT_PREFIX);
   }
 }
 
 export class BackupUploadHandler extends UploadHandler {
   constructor(state: DurableObjectState, env: Env) {
-    super(state, env, env.BACKUP_BUCKET);
+    super(state, env, env.BACKUP_BUCKET, BACKUP_PREFIX);
   }
 }
 

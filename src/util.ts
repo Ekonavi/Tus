@@ -89,7 +89,7 @@ export type Part = IntermediatePart | FinalPart | ErrorPart;
 // containing whatever was read before the error was encountered.
 export async function* generateParts(
   body: ReadableStream<Uint8Array>,
-  mem: WritableStreamBuffer,
+  mem: WritableStreamBuffer
 ): AsyncGenerator<Part> {
   try {
     for await (let chunk of body) {
@@ -147,4 +147,26 @@ export class AsyncLock {
       resolver();
     };
   }
+}
+
+export function mutableError(status: number, message?: string): Response {
+  console.log("STATUS:", status, message);
+  return new Response(JSON.stringify({ error: message || "Error" }), {
+    status,
+    headers: new Headers({ "Content-Type": "application/json" }),
+  });
+}
+export function rangeHeader(objLen: number, r2Range: R2Range): string {
+  let startIndexInclusive = 0;
+  let endIndexInclusive = objLen - 1;
+  if ("offset" in r2Range && r2Range.offset != null) {
+    startIndexInclusive = r2Range.offset;
+  }
+  if ("length" in r2Range && r2Range.length != null) {
+    endIndexInclusive = startIndexInclusive + r2Range.length - 1;
+  }
+  if ("suffix" in r2Range) {
+    startIndexInclusive = objLen - r2Range.suffix;
+  }
+  return `bytes ${startIndexInclusive}-${endIndexInclusive}/${objLen}`;
 }

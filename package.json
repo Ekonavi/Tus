@@ -16,7 +16,7 @@
   },
   "private": true,
   "scripts": {
-    "start": "wrangler dev",
+    "start": "wrangler dev -c wrangler.toml -c /Users/ghost/dev/work/ekonavi-projects/uploader.api/wrangler.toml --persist-to /Users/ghost/dev/wrangler/uploader-states",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,mdx}\" --cache",
     "format:write": "prettier --write \"**/*.{ts,tsx,js,jsx,mdx}\" --cache",
     "deploy": "wrangler publish",

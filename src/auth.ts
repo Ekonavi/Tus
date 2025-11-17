@@ -47,6 +47,7 @@ export async function createAuthWithClock(
       const actual = Buffer.from(sig, "hex");
       if (actual.length !== truncatedSignatureLength) {
         // timingSafeEqual throws if the buffers are not the same length
+        console.log('TIMING_SAFE_EQUAL:',actual.length !== truncatedSignatureLength)
         return false;
       }
       const data = Buffer.from(username + ":" + ts, "utf-8");
@@ -55,11 +56,13 @@ export async function createAuthWithClock(
         truncatedSignatureLength,
       );
       if (!crypto.subtle.timingSafeEqual(actual, expected)) {
+        console.log('NOT_TIME_SAFE_EQUAL:',crypto.subtle.timingSafeEqual(actual, expected))
         return false;
       }
 
       const now = clock();
       const tsSecs = parseInt(ts);
+      console.log("THIS IS TS_SEC+MAX_AGE_GRATER_OR_EQUAL?",tsSecs + maxAgeSeconds >= now)
       return tsSecs + maxAgeSeconds >= now;
     },
   };

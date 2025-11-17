@@ -6,8 +6,8 @@ logpush = true
 
 # Specifies the r2 buckets. r2 bucket names are scoped to your account (not global). The buckets should be publicly inaccessible.
 r2_buckets = [
-    { binding = "ATTACHMENT_BUCKET", bucket_name = "attachments-staging", preview_bucket_name = "attachments-staging" },
-    { binding = "BACKUP_BUCKET", bucket_name = "backups-staging", preview_bucket_name = "backups-staging" }
+    { binding = "ATTACHMENT_BUCKET", bucket_name = "attachments-dev", preview_bucket_name = "attachments-dev" },
+    { binding = "BACKUP_BUCKET", bucket_name = "backups-dev", preview_bucket_name = "backups-dev" }
 ]
 
 durable_objects.bindings = [
@@ -15,10 +15,11 @@ durable_objects.bindings = [
     { name = "BACKUP_UPLOAD_HANDLER", class_name = "BackupUploadHandler" }
 ]
 
-# Queue for upload completion notifications
 [[queues.producers]]
-queue = "upload-completed"
+queue = "upload-notification-dev"
 binding = "UPLOAD_QUEUE"
+
+# Queue for upload completion notifications
 
 [[migrations]]
 tag = "v1"
@@ -31,6 +32,7 @@ new_classes = ["BackupUploadHandler"]
 
 [env.production]
 name = "cdn3"
+
 durable_objects.bindings = [
     { name = "ATTACHMENT_UPLOAD_HANDLER", class_name = "AttachmentUploadHandler" },
     { name = "BACKUP_UPLOAD_HANDLER", class_name = "BackupUploadHandler" }
@@ -39,6 +41,11 @@ r2_buckets = [
     { binding = "ATTACHMENT_BUCKET", bucket_name = "attachments", preview_bucket_name = "attachments" },
     { binding = "BACKUP_BUCKET", bucket_name = "backups", preview_bucket_name = "backups" }
 ]
+
+[[env.production.queues.producers]]
+queue = "upload-notification"
+binding = "UPLOAD_QUEUE"
+
 
 [env.staging]
 name = "cdn3-staging"
@@ -51,5 +58,6 @@ r2_buckets = [
     { binding = "BACKUP_BUCKET", bucket_name = "backups-staging", preview_bucket_name = "backups-staging" }
 ]
 
-# To set an auth secret,
-# wrangler secrets put SHARED_AUTH_SECRET 
+[[env.staging.queues.producers]]
+queue = "upload-notification-staging"
+binding = "UPLOAD_QUEUE"

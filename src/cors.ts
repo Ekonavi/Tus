@@ -68,3 +68,8 @@ export const CORS_CONFIG = {
   maxAge: 14400,
   origin: (origin: string | null) => (isAllowedOrigin(origin) ? origin : ""),
 } as const;
+
+
+export const headerStandalone = ALLOWED_HEADERS.join(", ");
+export const methodsStandalone = ALLOWED_METHODS.join(", ");
+
