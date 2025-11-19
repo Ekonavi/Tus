@@ -39,7 +39,7 @@ async function tusClientUpload(
   await new Promise<void>((resolve, reject) => {
     // node tus.Upload takes Buffer but typescript bindings are wrong
     const upload = new tus.Upload(blob as unknown as Blob, {
-      endpoint: `http://${worker.address}:${worker.port}/upload/${pathPrefix}/`,
+      endpoint: `http://${worker.address}:${worker.port}/upload/${pathPrefix}?serviceId=${crypto.randomUUID()}`,
       metadata: { filename: name },
       headers: { Authorization: authHeader },
       onError: reject,
@@ -68,7 +68,7 @@ describe("tus-js-client-%s", () => {
       );
 
       const resp = await worker.fetch(
-        `http://localhost/${attachmentsPath}/${name}`
+        `http://localhost/${attachmentsPath}/${name}?serviceId=${crypto.randomUUID()}`
       );
       expect(await resp.text()).toBe("test");
     }
@@ -83,9 +83,11 @@ describe("tus-js-client-%s", () => {
       await backupHeaderFor(name, "write"),
       blob
     );
-    const resp = await worker.fetch(`http://localhost/${backupsPath}/${name}`, {
+    const resp = await worker.fetch(`http://localhost/${backupsPath}/${name}?serviceid=${crypto.randomUUID()}`, {
       headers: { Authorization: await backupHeaderFor("subdir", "read") },
     });
-    expect(await resp.text()).toBe("test");
+    const data= await resp.text()
+    console.log(data)
+    expect(data).toBe("test");
   });
 });
