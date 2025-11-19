@@ -168,8 +168,9 @@ dist
 
 # wrangler project
 
-.dev.vars
 .wrangler/
 
 .idea
 .vscode/*
+
+.*.vars

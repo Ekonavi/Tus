@@ -1,5 +1,5 @@
 {
-  "name": "attachments",
+  "name": "@ekonavi/Tus",
   "version": "0.9.0",
   "type": "module",
   "devDependencies": {
