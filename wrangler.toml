@@ -19,7 +19,7 @@ durable_objects.bindings = [
 queue = "upload-notification-dev"
 binding = "UPLOAD_QUEUE"
 
-# Queue for upload completion notifi`cations
+# Queue for upload completion notifications
 
 [[migrations]]
 tag = "v1"
