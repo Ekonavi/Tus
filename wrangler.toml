@@ -11,8 +11,8 @@ r2_buckets = [
 ]
 
 durable_objects.bindings = [
-    { name = "ATTACHMENT_UPLOAD_HANDLER", class_name = "AttachmentUploadHandler" },
-    { name = "BACKUP_UPLOAD_HANDLER", class_name = "BackupUploadHandler" }
+    { name = "ATTACHMENT_UPLOAD_HANDLER", script_name = "cdn3-dev",class_name = "AttachmentUploadHandler" },
+    { name = "BACKUP_UPLOAD_HANDLER", script_name = "cdn3-dev",class_name = "BackupUploadHandler" }
 ]
 
 [[queues.producers]]
@@ -34,8 +34,8 @@ new_classes = ["BackupUploadHandler"]
 name = "cdn3"
 
 durable_objects.bindings = [
-    { name = "ATTACHMENT_UPLOAD_HANDLER", class_name = "AttachmentUploadHandler" },
-    { name = "BACKUP_UPLOAD_HANDLER", class_name = "BackupUploadHandler" }
+    { name = "ATTACHMENT_UPLOAD_HANDLER", script_name = "cdn3" ,class_name = "AttachmentUploadHandler" },
+    { name = "BACKUP_UPLOAD_HANDLER", script_name = "cdn3" ,class_name = "BackupUploadHandler" }
 ]
 r2_buckets = [
     { binding = "ATTACHMENT_BUCKET", bucket_name = "attachments", preview_bucket_name = "attachments" },
@@ -50,8 +50,8 @@ binding = "UPLOAD_QUEUE"
 [env.staging]
 name = "cdn3-staging"
 durable_objects.bindings = [
-    { name = "ATTACHMENT_UPLOAD_HANDLER", class_name = "AttachmentUploadHandler" },
-    { name = "BACKUP_UPLOAD_HANDLER", class_name = "BackupUploadHandler" }
+    { name = "ATTACHMENT_UPLOAD_HANDLER", script_name = "cdn3-staging" , class_name = "AttachmentUploadHandler" },
+    { name = "BACKUP_UPLOAD_HANDLER", script_name = "cdn3-staging" , class_name = "BackupUploadHandler" }
 ]
 r2_buckets = [
     { binding = "ATTACHMENT_BUCKET", bucket_name = "attachments-staging", preview_bucket_name = "attachments-staging" },

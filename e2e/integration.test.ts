@@ -58,18 +58,20 @@ describe("tus-js-client-%s", () => {
     "uploads creation-with-upload=%s",
     async (uploadDataDuringCreation: boolean) => {
       const blob = Buffer.from("test", "utf-8");
+
       await tusClientUpload(
         name,
         attachmentsPath,
         await headerFor(name),
         blob,
-        { uploadDataDuringCreation: uploadDataDuringCreation },
+        { uploadDataDuringCreation: uploadDataDuringCreation }
       );
+
       const resp = await worker.fetch(
-        `http://localhost/${attachmentsPath}/${name}`,
+        `http://localhost/${attachmentsPath}/${name}`
       );
       expect(await resp.text()).toBe("test");
-    },
+    }
   );
 
   it("accepts uploads with slashes", async () => {
@@ -79,7 +81,7 @@ describe("tus-js-client-%s", () => {
       name,
       backupsPath,
       await backupHeaderFor(name, "write"),
-      blob,
+      blob
     );
     const resp = await worker.fetch(`http://localhost/${backupsPath}/${name}`, {
       headers: { Authorization: await backupHeaderFor("subdir", "read") },

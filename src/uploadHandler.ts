@@ -46,6 +46,12 @@ const UPLOAD_OFFSET_KEY = "upload-offset";
 // key for StoredUploadInfo
 const UPLOAD_INFO_KEY = "upload-info";
 
+// key to track if failure notification was sent (idempotency)
+const FAILURE_NOTIFIED_KEY = "failure-notified";
+
+// key to track if upload completed successfully (mutual exclusivity)
+const UPLOAD_COMPLETED_KEY = "upload-completed";
+
 // Stored for each part with the key of the multipart part number. Part numbers start with 1
 interface StoredR2Part {
   part: R2UploadedPart;
@@ -132,8 +138,11 @@ export class UploadHandler {
             console.error(
               `Upload for ${ue.r2Key} failed with unrecoverable error ${ue.message}`
             );
-            // this upload can never make progress, try to clean up
-            await this.cleanup(ue.r2Key);
+            // this upload can never make progress, send failure notification and clean up
+            await this.cleanup(ue.r2Key, {
+              error: ue.message,
+              errorType: "unrecoverable",
+            });
           } catch (cleanupError) {
             // ignore errors cleaning up
             console.error("error cleaning up " + cleanupError);
@@ -157,7 +166,13 @@ export class UploadHandler {
   }
 
   async alarm() {
-    return await this.cleanup();
+    // When alarm fires, the upload has expired (7 days timeout)
+    // Note: We don't have access to r2Key in alarm handler, so notification
+    // will be sent without it, but serviceId will still be included
+    return await this.cleanup(undefined, {
+      error: "Upload expired after 7 days",
+      errorType: "expired",
+    });
   }
 
   // create a new TUS upload
@@ -177,6 +192,7 @@ export class UploadHandler {
     const checksum = parseChecksum(request.headers);
 
     const r2Key = this.prefix + "/" + uploadMetadata.filename;
+
     if (!receivedToken) {
       console.log("NO TOKEN_FOUND");
       return mutableError(401, "no token found");
@@ -238,6 +254,7 @@ export class UploadHandler {
 
     const expiration = new Date(Date.now() + UPLOAD_EXPIRATION_MS);
     await this.state.storage.setAlarm(expiration);
+
     if (!isNaN(uploadLength)) {
       uploadInfo.uploadLength = uploadLength;
     }
@@ -271,7 +288,6 @@ export class UploadHandler {
   // get the current upload offset to resume an upload
   async head(request: IRequest): Promise<Response> {
     const r2Key = this.prefix + "/" + request.params.id!;
-    console.log("HEAD::", r2Key);
     let offset: number | undefined =
       await this.state.storage.get(UPLOAD_OFFSET_KEY);
     let uploadLength: number | undefined;
@@ -393,7 +409,10 @@ export class UploadHandler {
   ): Promise<number> {
     const uploadLength = uploadInfo.uploadLength;
     if ((uploadLength || 0) > MAX_UPLOAD_LENGTH_BYTES) {
-      await this.cleanup(r2Key);
+      await this.cleanup(r2Key, {
+        error: "Upload-Length exceeds maximum upload size",
+        errorType: "size_exceeded",
+      });
       throw new StatusError(413, "Upload-Length exceeds maximum upload size");
     }
 
@@ -418,11 +437,17 @@ export class UploadHandler {
     for await (const part of generateParts(body, mem)) {
       const newLength = uploadOffset + part.bytes.byteLength;
       if (uploadLength != null && newLength > uploadLength) {
-        await this.cleanup(r2Key);
+        await this.cleanup(r2Key, {
+          error: "body exceeds Upload-Length",
+          errorType: "size_exceeded",
+        });
         throw new StatusError(413, "body exceeds Upload-Length");
       }
       if (newLength > MAX_UPLOAD_LENGTH_BYTES) {
-        await this.cleanup(r2Key);
+        await this.cleanup(r2Key, {
+          error: "body exceeds maximum upload size",
+          errorType: "size_exceeded",
+        });
         throw new StatusError(413, "body exceeds maximum upload size");
       }
 
@@ -458,7 +483,6 @@ export class UploadHandler {
         }
         case "final":
         case "error": {
-          console.log("FINISH:FINAL:::");
           const finished =
             uploadLength != null &&
             uploadOffset + part.bytes.byteLength === uploadLength;
@@ -479,7 +503,6 @@ export class UploadHandler {
 
             await this.cleanup();
           } else {
-            console.log("APPEND BODY!");
             // upload the last part (can be less than the 5mb min part size), then complete the upload
             const uploadedPart = await this.r2UploadPart(
               r2Key,
@@ -516,11 +539,9 @@ export class UploadHandler {
     actual: ArrayBuffer
   ) {
     if (!Buffer.from(actual).equals(expected)) {
+      const errorMessage = `The SHA-256 checksum you specified ${toBase64(actual)} did not match what we received ${toBase64(expected)}.`;
       await this.cleanup(r2Key);
-      throw new StatusError(
-        415,
-        `The SHA-256 checksum you specified ${toBase64(actual)} did not match what we received ${toBase64(expected)}.`
-      );
+      throw new StatusError(415, errorMessage);
     }
   }
 
@@ -666,8 +687,8 @@ export class UploadHandler {
     } catch (e) {
       if (isR2ChecksumError(e)) {
         console.error(`checksum failure: ${e}`);
-        await this.cleanup();
-        throw new StatusError(415);
+        await this.cleanup(r2Key);
+        throw new StatusError(415, "Checksum validation failed");
       }
       if (isR2RateLimitError(e)) {
         console.log(`Rate-limit exceeded on PUT for key ${r2Key}`);
@@ -763,17 +784,23 @@ export class UploadHandler {
         return;
       }
 
+      // Mark upload as completed BEFORE sending message (mutual exclusivity protection)
+
       await this.env.UPLOAD_QUEUE.send({
-        type: "upload.completed",
-        serviceId: uploadInfo.serviceId,
-        r2Key: r2Key,
-        fileSize: fileSize,
-        uploadedAt: new Date().toISOString(),
-        multipartUploadId: uploadInfo.multipartUploadId,
-        checksum: uploadInfo.checksum
-          ? toBase64(uploadInfo.checksum)
-          : undefined,
+        type: "file:upload.completed",
+        data: {
+          serviceId: uploadInfo.serviceId,
+          r2Key: r2Key,
+          fileSize: fileSize,
+          uploadedAt: new Date().toISOString(),
+          multipartUploadId: uploadInfo.multipartUploadId,
+          checksum: uploadInfo.checksum
+            ? toBase64(uploadInfo.checksum)
+            : undefined,
+        },
       });
+
+      await this.state.storage.put(UPLOAD_COMPLETED_KEY, true);
 
       console.log(
         `Sent completion message for serviceId: ${uploadInfo.serviceId}`
@@ -782,6 +809,80 @@ export class UploadHandler {
       console.error("Failed to send queue message:", error);
       // Don't throw - upload already succeeded, message loss is acceptable
       // Client got 200 OK and file is in R2
+    }
+  }
+
+  // Send upload failure notification to queue
+  // This method ensures idempotency and mutual exclusivity with completion notifications
+  async sendFailureNotification(
+    r2Key: string,
+    error: string,
+    errorType: "unrecoverable" | "size_exceeded" | "expired"
+  ): Promise<void> {
+    try {
+      // Idempotency check: Don't send duplicate failure notifications
+      const alreadyNotified =
+        await this.state.storage.get(FAILURE_NOTIFIED_KEY);
+
+      if (alreadyNotified) {
+        console.log(
+          `Failure notification already sent for ${r2Key}, skipping duplicate`
+        );
+        return;
+      }
+
+      // Mutual exclusivity check: Don't send failure if upload completed successfully
+      const uploadCompleted =
+        await this.state.storage.get(UPLOAD_COMPLETED_KEY);
+
+      if (uploadCompleted) {
+        console.log(
+          `Upload ${r2Key} already completed successfully, skipping failure notification`
+        );
+        return;
+      }
+
+      const uploadInfo: StoredUploadInfo | undefined =
+        await this.state.storage.get(UPLOAD_INFO_KEY);
+
+      if (!uploadInfo?.serviceId) {
+        console.warn(
+          "No serviceId found in upload info, skipping failure notification"
+        );
+        return;
+      }
+
+      if (!this.env.UPLOAD_QUEUE) {
+        console.warn(
+          "UPLOAD_QUEUE not configured, skipping failure notification"
+        );
+        return;
+      }
+
+      const uploadOffset: number | undefined =
+        await this.state.storage.get(UPLOAD_OFFSET_KEY);
+
+      await this.env.UPLOAD_QUEUE.send({
+        type: "file:upload.failed",
+        data: {
+          serviceId: uploadInfo.serviceId,
+          error: error,
+          r2Key: r2Key,
+          errorType: errorType,
+          uploadOffset: uploadOffset || 0,
+          failedAt: new Date().toISOString(),
+        },
+      });
+
+      // Mark as notified BEFORE cleanup deletes storage
+      await this.state.storage.put(FAILURE_NOTIFIED_KEY, true);
+
+      console.log(
+        `Sent failure notification for serviceId: ${uploadInfo.serviceId}, reason: ${errorType}`
+      );
+    } catch (error) {
+      console.error("Failed to send failure notification:", error);
+      // Don't throw - cleanup should still proceed
     }
   }
 
@@ -798,7 +899,24 @@ export class UploadHandler {
   //    will hit a 404.
   // 3. The client has made a mistake uploading that cannot be fixed by retrying with different arguments. e.g.,
   //    an upload with an incorrect checksum.
-  async cleanup(r2Key?: string): Promise<void> {
+  //
+  // If failureInfo is provided, a failure notification will be sent to the queue before cleanup.
+  async cleanup(
+    r2Key?: string,
+    failureInfo?: {
+      error: string;
+      errorType: "unrecoverable" | "size_exceeded" | "expired";
+    }
+  ): Promise<void> {
+    // Send failure notification BEFORE deleting storage
+    if (failureInfo && r2Key) {
+      await this.sendFailureNotification(
+        r2Key,
+        failureInfo.error,
+        failureInfo.errorType
+      );
+    }
+
     // Try our best to clean up R2 state we may have left around, but if
     // we fail these objects/transactions will eventually expire. We don't
     // bother removing temporaries because the majority of uploads should
