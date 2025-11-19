@@ -4,16 +4,6 @@ compatibility_date = "2023-05-10"
 compatibility_flags = ["nodejs_compat"]
 logpush = true
 
-# Specifies the r2 buckets. r2 bucket names are scoped to your account (not global). The buckets should be publicly inaccessible.
-r2_buckets = [
-    { binding = "ATTACHMENT_BUCKET", bucket_name = "attachments-dev", preview_bucket_name = "attachments-dev" },
-    { binding = "BACKUP_BUCKET", bucket_name = "backups-dev", preview_bucket_name = "backups-dev" }
-]
-
-durable_objects.bindings = [
-    { name = "ATTACHMENT_UPLOAD_HANDLER", script_name = "ekonavi-tus-dev",class_name = "AttachmentUploadHandler" },
-    { name = "BACKUP_UPLOAD_HANDLER", script_name = "ekonavi-tus-dev",class_name = "BackupUploadHandler" }
-]
 
 [[queues.producers]]
 queue = "upload-notification-dev"
@@ -69,8 +59,8 @@ durable_objects.bindings = [
     { name = "BACKUP_UPLOAD_HANDLER", script_name = "ekonavi-tus-dev" , class_name = "BackupUploadHandler" }
 ]
 r2_buckets = [
-    { binding = "ATTACHMENT_BUCKET", bucket_name = "attachments-staging", preview_bucket_name = "attachments-staging" },
-    { binding = "BACKUP_BUCKET", bucket_name = "backups-staging", preview_bucket_name = "backups-staging" }
+    { binding = "ATTACHMENT_BUCKET", bucket_name = "attachments-dev", preview_bucket_name = "attachments-dev" },
+    { binding = "BACKUP_BUCKET", bucket_name = "backups-dev", preview_bucket_name = "backups-dev" }
 ]
 
 [[env.dev.queues.producers]]
