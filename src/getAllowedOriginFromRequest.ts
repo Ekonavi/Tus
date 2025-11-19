@@ -36,11 +36,11 @@ export function getCorsHeaders(
   return headers;
 }
 export async function optionsHandler(
-  _request: IRequest,
+  request: IRequest,
   _env: Env
 ): Promise<Response> {
+
   const header = new Headers({
-    "Access-Control-Allow-Origin": "https://localhost.ekonavi.com:3007",
     "Access-Control-Allow-Headers": headerStandalone,
     "Access-Control-Allow-Method": methodsStandalone,
     "Access-Control-Expose-Headers": headerStandalone,
@@ -51,7 +51,7 @@ export async function optionsHandler(
       "creation,creation-defer-length,creation-with-upload,expiration",
   });
 
-  const newHeader = getCorsHeaders(_request, header);
+  const newHeader = getCorsHeaders(request, header);
   return new Response(null, {
     status: 204,
     headers: newHeader,
