@@ -39,7 +39,6 @@ npm test
 
 Deploying
 ---------
-
 ### One time setup
 1. Create an R2 bucket and update the binding in `wrangler.toml`
 2. Add a base64 encoded shared auth secret with `wrangler secret put SHARED_AUTH_SECRET`
